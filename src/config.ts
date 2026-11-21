@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { parseReview } from "./review.ts";
 import type { Check, Config, Invocation, Profile, Role } from "./types.ts";
 
 export const DEFAULT_PROFILES: Record<Role, Profile> = {
@@ -42,6 +43,16 @@ export const DEFAULT_PROFILES: Record<Role, Profile> = {
 		delegation: ["worker", "thinker"],
 		timeoutMs: 1_800_000,
 		delivery: "pr",
+	},
+	crmanager: {
+		role: "crmanager",
+		model: "openai-codex/gpt-6.1-sol:high",
+		workspace: "clone",
+		runtime: "host",
+		permissions: "read-only",
+		delegation: [],
+		timeoutMs: 1_800_000,
+		delivery: "none",
 	},
 };
 export const DEFAULT_CONFIG: Config = {
@@ -166,10 +177,14 @@ export function resolveConfig(user: Record<string, any> = {}, project: Record<st
 	const userLayer = layer(user),
 		projectLayer = layer(project);
 	// Executable extension loading and publication authorization belong to the user, not a repo.
-	for (const key of ["extensions", "publication"])
+	for (const key of ["extensions", "publication", "reviewExtension"])
 		if (key in projectLayer) throw new Error(`delegates.${key} must be configured at user scope`);
 	const raw = merge(merge(DEFAULT_CONFIG, userLayer), projectLayer);
-	keys(raw, Object.keys(DEFAULT_CONFIG).concat("publication"), "delegates");
+	keys(raw, Object.keys(DEFAULT_CONFIG).concat("publication", "reviewExtension"), "delegates");
+	if (raw.reviewExtension !== undefined) {
+		text(raw.reviewExtension, "reviewExtension");
+		if (!path.isAbsolute(raw.reviewExtension)) throw new Error("reviewExtension must be an absolute file path");
+	}
 	if (raw.version !== 1) throw new Error("Unsupported delegates configuration version");
 	for (const key of ["maxParallel", "maxThinkers", "maxSubmissions"]) positive(raw[key], key, 32);
 	positive(raw.maxOutputBytes, "maxOutputBytes", 1_000_000);
@@ -183,11 +198,11 @@ export function resolveConfig(user: Record<string, any> = {}, project: Record<st
 		const p = object(value, name);
 		keys(p, Object.keys(DEFAULT_PROFILES.worker).concat("extends"), name);
 		const base = p.extends ?? p.role ?? name;
-		if (!(base in DEFAULT_PROFILES))
-			throw new Error(`${name}: extends must name thinker, thinktank, worker, or prmanager`);
+		if (!Object.hasOwn(DEFAULT_PROFILES, base))
+			throw new Error(`${name}: extends must name thinker, thinktank, worker, prmanager, or crmanager`);
 		const profile: Record<string, any> = { ...DEFAULT_PROFILES[base as Role], ...p };
 		delete profile.extends;
-		if (!(profile.role in DEFAULT_PROFILES)) throw new Error(`Invalid role: ${profile.role}`);
+		if (!Object.hasOwn(DEFAULT_PROFILES, profile.role)) throw new Error(`Invalid role: ${profile.role}`);
 		if (name in DEFAULT_PROFILES && profile.role !== name)
 			throw new Error(`Cannot change built-in role ${name}`);
 		if (profile.runtime !== "host")
@@ -212,6 +227,8 @@ export function resolveConfig(user: Record<string, any> = {}, project: Record<st
 			(profile.workspace !== "clone" || profile.permissions !== "read-write")
 		)
 			throw new Error("PR manager must be clone/read-write");
+		if (profile.role === "crmanager" && (profile.workspace !== "clone" || profile.permissions !== "read-only"))
+			throw new Error("Code review manager must be clone/read-only");
 		if (
 			!["none", "candidate", "pr"].includes(profile.delivery) ||
 			(profile.role !== "prmanager" && profile.delivery !== "none") ||
@@ -348,10 +365,13 @@ export function validateInvocation(input: unknown, config: Config, parent?: Prof
 		throw new Error("Task is empty or too large");
 	if (v.model !== undefined) text(v.model, "model");
 	for (const key of ["base", "continue"]) if (v[key] !== undefined) text(v[key], key);
+	if (v.continue && profile.role === "crmanager") throw new Error("Start a fresh crmanager review instead of continuing");
 	if (v.continue && !/^[a-f0-9-]{36}$/.test(v.continue)) throw new Error("Invalid continuation job ID");
 	if (v.base && (profile.workspace !== "clone" || v.continue))
 		throw new Error("base requires a new clone workspace");
-	return { ...v, name: validateName(v.name) } as Invocation;
+	const invocation = { ...v, name: validateName(v.name) } as Invocation;
+	if (profile.role === "crmanager") parseReview(invocation);
+	return invocation;
 }
 export function migrateSettings(file: string): string {
 	const settings = readSettings(file);

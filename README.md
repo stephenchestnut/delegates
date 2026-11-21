@@ -1,6 +1,6 @@
 # Delegates
 
-A standalone Pi extension that runs configurable subagents for research, coding, and verified PR delivery. It is separate from Pi's example `subagent` extension.
+A standalone Pi extension that runs configurable subagents for research, code review, coding, and verified PR delivery. It is separate from Pi's example `subagent` extension.
 
 ## Install
 
@@ -10,7 +10,7 @@ pi install git:github.com/stephenchestnut/delegates
 
 Restart Pi or run `/reload`, then use `/delegates config` to check that it loaded. To try the package from a local checkout, run `pi install "$PWD"` from the repo root instead. To update the Git install, run `pi update git:github.com/stephenchestnut/delegates`.
 
-Delegates runs on macOS and Linux. Use a current Pi with codemode, structured tool results, and nested tool hooks (tested with Pi 1.6.0). Git is required for installation from Git and for clone workspaces. `gh` and GitHub authentication are required only for PR delivery. If the default models aren't available in your Pi setup, use `/delegates models` to select models or inherit the current session model.
+Delegates runs on macOS and Linux. Use a current Pi with codemode, structured tool results, and nested tool hooks (tested with Pi 1.6.0). Git is required for installation from Git and for clone workspaces. `gh` and GitHub authentication are required for GitHub PR review and delivery. If the default models aren't available in your Pi setup, use `/delegates models` to select models or inherit the current session model.
 
 **Host execution only.** A clone is not a sandbox. `runtime: "container"` is not supported; neither are worktrees, microVMs, detached execution across Pi shutdown, or automatic merging.
 
@@ -22,10 +22,11 @@ Delegates runs on macOS and Linux. Use a current Pi with codemode, structured to
 | `thinktank` | Caller workspace | Host | Read-only | Thinkers | Synthesized research report |
 | `worker` | Caller workspace | Host | Read/write | Thinkers | Changes and report |
 | `prmanager` | Private clone | Host | Read/write | Workers and thinkers | Verified PR |
+| `crmanager` | Private clone | Host | Read-only | None | Code review report |
 
 A worker launched by a prmanager shares **the prmanager's clone**, never the original checkout. One coding worker owns writes in a shared workspace at a time; its caller must yield writes until it finishes. Independent prmanagers can run concurrently in independent clones. Thinkers can research concurrently, but may observe files changing unless asked to review a finalized candidate.
 
-Models are configurable per profile. Defaults preserve the previous extension's choices, with thinktank using the research model too: thinker/thinktank/prmanager use `openai-codex/gpt-6.1-sol:high`; worker uses `openai-codex/gpt-6-luna:medium`. These are preferences, not a hard-coded model-strength ordering. Exact `provider/model` IDs, an optional thinking suffix, and `inherit` are supported. Inherited nested models use the caller delegate's resolved model.
+Models are configurable per profile. Thinker, thinktank, prmanager, and crmanager default to `openai-codex/gpt-6.1-sol:high`; worker uses `openai-codex/gpt-6-luna:medium`. These are preferences, not a hard-coded model-strength ordering. Exact `provider/model` IDs, an optional thinking suffix, and `inherit` are supported. Inherited nested models use the caller delegate's resolved model.
 
 ## Migrate from the dotfiles installation
 
@@ -72,6 +73,31 @@ Pass this to `delegate`. Optional invocation fields:
 - `base`: committed Git reference for a new clone. By default the parent must be clean. An explicit base intentionally excludes dirty changes and reports that fact.
 - `continue`: existing clone job ID to revise. Supply its original profile, a name, and the new task. Only the top-level caller can continue retained jobs.
 
+### Read-only code review with a crmanager
+
+Install [pi-review](https://github.com/earendil-works/pi-review) with `pi install git:github.com/earendil-works/pi-review`. Delegates locates the standard Git installation in the Pi agent directory. For a different installation, set `delegates.reviewExtension` to the absolute path of its `review.ts` in **user** settings.
+
+```js
+const result = await tools.delegate({
+  profile: "crmanager",
+  name: "review feature",
+  base: "feature",
+  task: "/review branch main\nFocus on error handling and missing tests.",
+});
+text(result.success ? result.summary : result.error);
+```
+
+Start the task with one of these commands, followed by optional review focus on separate lines:
+
+| Command | What it reviews |
+| --- | --- |
+| `/review commit REF` | One commit, resolved locally from a SHA or ref |
+| `/review branch BASE` | The selected head (caller HEAD by default; set `base` to another local ref) against its merge base with BASE |
+| `/review pr NUMBER_OR_URL` | A GitHub PR in the checkout's `origin` repository; fetches the identified head and base into the clone without publishing |
+| `/review uncommitted` | A snapshot of staged, unstaged, and nonignored untracked files; ignored files are not copied |
+
+The harness prepares the review snapshot, then runs pi-review's command in the headless child. The reviewer gets file-reading tools and a bounded, read-only diff tool. It has no Bash, edit, write, nested delegates, extra extension tools, or delivery tools. Project setup and tests do not run. The caller gets prioritized findings and recommendations in `summary`, not code changes, PR comments, or pushes. Start a fresh job for re-review; inspect or discard old clones as usual.
+
 ### Research coordination with a thinktank
 
 ```js
@@ -83,7 +109,7 @@ const report = await tools.delegate({
 text(report.summary);
 ```
 
-Thinktanks have read-only tools plus `delegate`/`delegate_parallel`, restricted to thinker children. They cannot start workers, prmanagers, or other thinktanks, and cannot call verification/submission tools. Ordinary thinkers still cannot delegate.
+Thinktanks have read-only tools plus `delegate`/`delegate_parallel`, restricted to thinker children. They cannot start workers, prmanagers, crmanagers, or other thinktanks, and cannot call verification/submission tools. Ordinary thinkers still cannot delegate.
 
 No clone, clean checkout, Git repository, test/lint configuration, or publication authorization is required. Completion is a report, not a commit or PR. Thinktanks use top-level concurrency slots, not the leaf `maxThinkers` budget; their thinkers share the usual bounded thinker budget. Cancellation stops and joins the research children.
 
@@ -111,7 +137,7 @@ Results include `id`, `name`, `profile`, `model`, `success`, `execution`, `summa
 
 Launch/argument/authorization failures may reject the call. Once a job is established, execution and delivery failures are generally returned as structured unsuccessful results. **A resolved promise is not proof of success.** Check `success` and the component statuses.
 
-Both launch tools are directly callable and callable from codemode, including `codemode.mode: "only"`. Child Pi processes explicitly load their own codemode. Children can reach only tools permitted by their profile; hiding a declaration is not treated as authorization. Thinker codemode cannot write or delegate. Thinktank codemode can call thinkers and approved research tools, but cannot write or publish. Worker codemode can delegate to thinkers; prmanager codemode can delegate to workers/thinkers and call delivery tools.
+Both launch tools are directly callable and callable from codemode, including `codemode.mode: "only"`. Child Pi processes explicitly load their own codemode. Children can reach only tools permitted by their profile; hiding a declaration is not treated as authorization. Thinker codemode cannot write or delegate. Thinktank codemode can call thinkers and approved research tools, but cannot write or publish. Worker codemode can delegate to thinkers; prmanager codemode can delegate to workers/thinkers and call delivery tools. Crmanager codemode can read the prepared review diff and inspect files, but cannot edit or publish.
 
 Always `await` delegate calls. Ending a codemode script or reaching its deadline cancels outstanding calls; avoid short generic script deadlines around long prmanager tasks. Pi disallows a script directly starting another codemode script, but **parent codemode → delegate subprocess → child codemode** is supported and covered by a real-Pi smoke test.
 
@@ -146,11 +172,11 @@ User settings: `<agent-dir>/settings.json`. Trusted project defaults: `<cwd>/.pi
 }
 ```
 
-Custom profiles extend one of the four built-in roles. Allowed fields: `role`, `model`, `workspace`, `runtime`, `permissions`, `delegation`, `timeoutMs`, `delivery`; `extends` is used only in configuration. Roles impose ceilings: thinkers are shared/read-only and cannot delegate; thinktanks are shared/read-only and may delegate only to thinkers; workers may delegate only to thinkers; prmanagers require a writable clone and cannot spawn prmanagers. You can narrow capabilities, not evade these ceilings through a custom name.
+Custom profiles extend one of the five built-in roles. Allowed fields: `role`, `model`, `workspace`, `runtime`, `permissions`, `delegation`, `timeoutMs`, `delivery`; `extends` is used only in configuration. Roles impose ceilings: thinkers are shared/read-only and cannot delegate; thinktanks are shared/read-only and may delegate only to thinkers; workers may delegate only to thinkers; prmanagers require a writable clone and cannot spawn prmanagers; crmanagers require a read-only clone and cannot delegate. You can narrow capabilities, not evade these ceilings through a custom name.
 
 `workspace` is `shared` or `clone`; `runtime` currently must be `host`. Only prmanagers have `candidate` or `pr` delivery. Other roles use `none`. Arrays replace rather than concatenate. Unknown fields and unsupported combinations fail clearly.
 
-Project settings cannot configure executable extension loading or authorize publication. They cannot increase user concurrency/output/task/submission budgets, broaden delegation or read-only permissions, increase profile timeouts, replace required user checks, or broaden an explicit user file scope. Default prmanager/worker/thinker/thinktank timeouts are 30/10/10/10 minutes.
+Project settings cannot configure executable extension loading or authorize publication. They cannot increase user concurrency/output/task/submission budgets, broaden delegation or read-only permissions, increase profile timeouts, replace required user checks, or broaden an explicit user file scope. Prmanager and crmanager default to 30 minutes; the other roles default to 10 minutes.
 
 ### Project environment
 
@@ -264,9 +290,9 @@ Delegates
   ● [thinker] · Running · 1 turns · 8k tok · 11s · Abyssinian
 ```
 
-The **text of profile labels** is colored: thinker blue, thinktank purple, worker gold, and prmanager orange, with light/dark variants. Custom profiles inherit their resolved role's color in the live display. Status symbols/text independently use theme colors: active accent, success green, warning amber, failure red, and cancellation/interruption muted. Task names stay neutral. No colored-circle emoji or decorative badges are added.
+The **text of profile labels** is colored: thinker blue, thinktank purple, worker gold, prmanager orange, and crmanager teal, with light/dark variants. Custom profiles inherit their resolved role's color in the live display. Status symbols/text independently use theme colors: active accent, success green, warning amber, failure red, and cancellation/interruption muted. Task names stay neutral. No colored-circle emoji or decorative badges are added.
 
-- Thinkers, thinktanks, and ordinary workers do not show irrelevant `not-run` / `not-requested` placeholders. PR workflows show meaningful phases such as `Verifying`, `Publishing`, and `Waiting for CI`.
+- Thinkers, thinktanks, crmanagers, and ordinary workers do not show irrelevant `not-run` / `not-requested` placeholders. PR workflows show meaningful phases such as `Verifying`, `Publishing`, and `Waiting for CI`.
 - Specific activity labels come from observed tools, not guessed model behavior. Children running means `Coordinating`, not necessarily an idle parent. `2/4 finished` counts the children launched so far; failed/cancelled children get explicit counts instead.
 - Compact rows include the delegate's own turns and estimated context tokens rounded to the nearest thousand (e.g. `12k tok`) where space permits; model and full IDs remain hidden. Duplicate sibling/root names get a short ID suffix for distinction, **not** an abbreviation accepted by commands.
 - `delegates.display: "detailed"` adds ID/model, self and final subtree turns, and context estimate as space permits. `?` means unknown; older manifests without self usage never treat aggregate turns as self turns.
@@ -286,7 +312,7 @@ The top-level tools carry concise profile-selection and concurrency instructions
 ## Security boundaries
 
 - A clone isolates source files/Git metadata, **not operating-system authority**.
-- Thinker/thinktank read-only behavior is a tool-level allowlist with direct/nested-call checks, not an OS sandbox. Trusted extensions still execute as your user.
+- Thinker, thinktank, and crmanager read-only behavior is a tool-level allowlist with direct/nested-call checks, not an OS sandbox. Trusted extensions still execute as your user.
 - Host workers/prmanagers have shell access and can access paths, credentials, Keychain helpers, and network services available to your user. Central publication tools provide reliability, not a security boundary against a malicious same-user agent.
 - The private control socket and per-job tokens coordinate jobs; they do not protect against unrestricted code running as the same user.
 - Job logs contain model/tool output and may contain sensitive project data. Protect the agent directory; no log redaction can guarantee removal of secrets emitted by arbitrary tools.

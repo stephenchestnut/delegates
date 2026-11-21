@@ -11,6 +11,7 @@ import { createClone, resolveBase, validateWorkspace } from "./workspace.ts";
 import type { Base } from "./workspace.ts";
 import { candidateTree, git } from "./delivery/git.ts";
 import { verify } from "./delivery/verification.ts";
+import { parseReview, prepareReview, reviewDiff, type PreparedReview } from "./review.ts";
 import { submit, validateSubmission } from "./delivery/workflow.ts";
 import { emptyUsage, resultOf } from "./types.ts";
 import { DisplayTracker, type DisplayRun, type LaunchIdentity } from "./display.ts";
@@ -22,6 +23,8 @@ interface Running {
 	token: string;
 	runtime: Runtime;
 	ready?: boolean;
+	review?: NonNullable<ChildContext["review"]> & PreparedReview;
+	reviewError?: string;
 }
 interface Owner {
 	jobId: string;
@@ -89,7 +92,14 @@ export class Coordinator {
 			const combined = AbortSignal.any([signal, running.controller.signal]);
 			switch (r.op) {
 				case "context":
-					return this.context(job);
+					return this.context(running);
+				case "reviewError":
+					if (job.profile.role !== "crmanager") throw new Error("Only crmanagers may report review startup errors");
+					running.reviewError = String((r.args as { error?: unknown })?.error ?? "Review startup failed");
+					return true;
+				case "reviewDiff":
+					if (job.profile.role !== "crmanager" || !running.review) throw new Error("Only crmanagers may read the prepared review diff");
+					return reviewDiff(running.runtime, job.workspace.path, running.review, r.args, combined);
 				case "ready":
 					running.ready = true;
 					return true;
@@ -141,7 +151,7 @@ export class Coordinator {
 			}
 		}));
 	}
-	private context(job: Job): ChildContext {
+	private context({ job, review }: Running): ChildContext {
 		return {
 			profile: job.profile,
 			config: job.config,
@@ -149,6 +159,7 @@ export class Coordinator {
 				.filter(([, p]) => job.profile.delegation.includes(p.role))
 				.map(([name]) => name),
 			allowedTools: allowedTools(job.profile, job.config),
+			review,
 		};
 	}
 	private isMutation(profile: Profile, config: Config, tool: string): boolean {
@@ -224,7 +235,10 @@ export class Coordinator {
 		const runtime = createRuntime("host");
 		let base: Base | undefined;
 		try {
-			if (cloneTasks.length) base = await resolveBase(runtime, cwd, cloneTasks[0].base);
+			if (cloneTasks.length) {
+				const allReview = cloneTasks.every(i => config.profiles[i.profile].role === "crmanager");
+				base = await resolveBase(runtime, cwd, cloneTasks[0].base ?? (allReview ? "HEAD" : undefined));
+			}
 		} finally {
 			await runtime.shutdown();
 		}
@@ -428,6 +442,12 @@ export class Coordinator {
 				throw new Error(
 					"prmanager delivery needs delegates.publication authorization in user settings. Configure it or use a candidate-only profile.",
 				);
+			const reviewRequest = profile.role === "crmanager" ? parseReview(invocation) : undefined;
+			const reviewExtension = reviewRequest
+				? config.reviewExtension ?? path.join(this.options.agentDir, "git/github.com/earendil-works/pi-review/review.ts")
+				: undefined;
+			if (reviewExtension && !fs.statSync(reviewExtension, { throwIfNoEntry: false })?.isFile())
+				throw new Error("crmanager needs pi-review. Install it with pi install git:github.com/earendil-works/pi-review or set delegates.reviewExtension to its absolute file path.");
 			if (invocation.continue) {
 				await validateWorkspace(
 					runtime,
@@ -437,33 +457,40 @@ export class Coordinator {
 					combined,
 				);
 			} else if (profile.workspace === "clone") {
-				base ??= await resolveBase(runtime, cwd, invocation.base);
+				base ??= await resolveBase(runtime, cwd, invocation.base ?? (reviewRequest ? "HEAD" : undefined));
 				job.workspace = await createClone(
 					runtime,
-					base,
+					reviewRequest ? { ...base, subdir: "" } : base,
 					job.logDir,
 					id,
 					invocation.name,
-					config.publication?.remote ?? "origin",
+					reviewRequest ? "origin" : config.publication?.remote ?? "origin",
 					combined,
 				);
 				this.save(job);
-				const before = await candidateTree(runtime, job.workspace.path, job.logDir, combined);
-				for (const [i, setup] of config.environment.setup.entries()) {
-					const r = await runtime.execute({
-						executable: "/bin/sh",
-						args: ["-c", setup.command],
-						cwd: job.workspace.cwd,
-						signal: combined,
-						timeoutMs: setup.timeoutMs,
-						log: path.join(job.logDir, `setup-${i}.log`),
-					});
-					if (r.code || r.interrupted) throw new Error(`Setup ${setup.name} failed; see job logs`);
+				if (reviewRequest && reviewExtension) {
+					const prepared = await prepareReview(runtime, reviewRequest, job.workspace, job.logDir, combined);
+					if (job.workspace.excludedDirtyChanges) prepared.scope += "; uncommitted caller changes excluded";
+					running.review = { ...prepared, extension: reviewExtension };
+					this.save(job);
+				} else {
+					const before = await candidateTree(runtime, job.workspace.path, job.logDir, combined);
+					for (const [i, setup] of config.environment.setup.entries()) {
+						const r = await runtime.execute({
+							executable: "/bin/sh",
+							args: ["-c", setup.command],
+							cwd: job.workspace.cwd,
+							signal: combined,
+							timeoutMs: setup.timeoutMs,
+							log: path.join(job.logDir, `setup-${i}.log`),
+						});
+						if (r.code || r.interrupted) throw new Error(`Setup ${setup.name} failed; see job logs`);
+					}
+					if ((await candidateTree(runtime, job.workspace.path, job.logDir, combined)) !== before)
+						throw new Error(
+							"Setup changed candidate source files; inspect the retained workspace before continuation",
+						);
 				}
-				if ((await candidateTree(runtime, job.workspace.path, job.logDir, combined)) !== before)
-					throw new Error(
-						"Setup changed candidate source files; inspect the retained workspace before continuation",
-					);
 			}
 			if (profile.workspace === "shared" && profile.permissions === "read-write") {
 				if (this.reservations.has(job.workspace.path) || this.toolOwners.has(job.workspace.path))
@@ -501,10 +528,10 @@ export class Coordinator {
 				promptFile,
 			];
 			for (const e of config.extensions)
-				if (profile.permissions === "read-write" || e.readOnly) args.push("-e", e.path);
+				if (!reviewRequest && (profile.permissions === "read-write" || e.readOnly)) args.push("-e", e.path);
 			args.push(
 				"--",
-				`Task: ${invocation.task}\n\n${invocation.continue ? `Continue retained candidate ${id}; previous PR: ${job.delivery.prUrl ?? "none"}. Inspect existing changes before editing.` : ""}\n${job.workspace.excludedDirtyChanges ? "The caller explicitly selected a committed base. Uncommitted parent changes were excluded." : ""}`,
+				reviewRequest ? "/delegates-review" : `Task: ${invocation.task}\n\n${invocation.continue ? `Continue retained candidate ${id}; previous PR: ${job.delivery.prUrl ?? "none"}. Inspect existing changes before editing.` : ""}\n${job.workspace.excludedDirtyChanges ? "The caller explicitly selected a committed base. Uncommitted parent changes were excluded." : ""}`,
 			);
 			let buffer = "",
 				providerError = "",
@@ -563,11 +590,13 @@ export class Coordinator {
 			});
 			if (buffer.trim()) onLine(buffer);
 			if (r.interrupted || combined.aborted || aborted) throw new Error("Delegate cancelled or timed out");
-			if (r.code || providerError) throw new Error(providerError || r.stderr || `Child exited ${r.code}`);
+			if (running.reviewError || r.code || providerError)
+				throw new Error(running.reviewError || providerError || r.stderr || `Child exited ${r.code}`);
 			if (!running.ready)
 				throw new Error(
 					"Delegate initialization did not complete; inspect child logs for missing tools/provider extensions",
 				);
+			if (reviewRequest && !job.summary.trim()) throw new Error("The /review command produced no review report; inspect child logs");
 			job.execution = "stopped";
 			if (profile.delivery !== "none" && !["delivered", "candidate-ready"].includes(job.delivery.status))
 				job.error =
@@ -600,26 +629,28 @@ export class Coordinator {
 			await Promise.allSettled([...(this.childRuns.get(id) ?? [])]);
 			this.childRuns.delete(id);
 			await runtime.shutdown();
-			const inspection = createRuntime("host");
-			try {
-				const bounded = AbortSignal.timeout(5_000);
-				const tracked = await git(
-					inspection,
-					job.workspace.path,
-					["diff", "--name-only", "-z", job.workspace.baseSha ?? "HEAD", "--"],
-					bounded,
-				);
-				const untracked = await git(
-					inspection,
-					job.workspace.path,
-					["ls-files", "--others", "--exclude-standard", "-z"],
-					bounded,
-				);
-				job.changedFiles = [...new Set((tracked + "\0" + untracked).split("\0").filter(Boolean))];
-			} catch {
-				/* Non-Git shared workspaces and failed preparation still return their original result. */
-			} finally {
-				await inspection.shutdown();
+			if (profile.role !== "crmanager") {
+				const inspection = createRuntime("host");
+				try {
+					const bounded = AbortSignal.timeout(5_000);
+					const tracked = await git(
+						inspection,
+						job.workspace.path,
+						["diff", "--name-only", "-z", job.workspace.baseSha ?? "HEAD", "--"],
+						bounded,
+					);
+					const untracked = await git(
+						inspection,
+						job.workspace.path,
+						["ls-files", "--others", "--exclude-standard", "-z"],
+						bounded,
+					);
+					job.changedFiles = [...new Set((tracked + "\0" + untracked).split("\0").filter(Boolean))];
+				} catch {
+					/* Non-Git shared workspaces and failed preparation still return their original result. */
+				} finally {
+					await inspection.shutdown();
+				}
 			}
 			if (reserved && this.reservations.get(job.workspace.path) === id)
 				this.reservations.delete(job.workspace.path);

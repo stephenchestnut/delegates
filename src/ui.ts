@@ -18,8 +18,12 @@ const ROLE_RGB: Record<"dark" | "light", Record<Role, [number, number, number]>>
 		thinktank: [198, 154, 255],
 		worker: [235, 203, 99],
 		prmanager: [255, 173, 103],
+		crmanager: [95, 211, 177],
 	},
-	light: { thinker: [20, 83, 153], thinktank: [112, 46, 153], worker: [111, 83, 0], prmanager: [154, 62, 0] },
+	light: {
+		thinker: [20, 83, 153], thinktank: [112, 46, 153], worker: [111, 83, 0],
+		prmanager: [154, 62, 0], crmanager: [0, 111, 91],
+	},
 };
 const STATUS_TOKEN = {
 	active: "accent",

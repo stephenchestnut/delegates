@@ -1,9 +1,10 @@
 import type { Config, Profile } from "./types.ts";
 
-export const PARENT_GUIDANCE = `Use delegates for bounded work that benefits from a separate context. Choose thinker for individual read-only research/review, thinktank to coordinate several thinkers and synthesize a research report without Git or PR delivery, worker for a change in your current checkout, and prmanager for an independently implemented and verified PR in a private clone. Do small tasks directly. Give every delegate a short descriptive name and clear acceptance criteria. Use delegate_parallel for independent research or prmanagers that need one common starting commit. Never run concurrent writable workers in a shared checkout; while a worker runs, yield writes to it. PR managers publish only through explicit verified submission to an authorized repository. A successful process exit is not necessarily successful delivery. Inspect structured execution, verification, and delivery states.`;
+export const PARENT_GUIDANCE = `Use delegates for bounded work that benefits from a separate context. Choose thinker for individual read-only research/review, thinktank to coordinate several thinkers and synthesize a research report without Git or PR delivery, worker for a change in your current checkout, prmanager for an independently implemented and verified PR in a private clone, and crmanager for a read-only review in a private clone. For crmanager, start task with \`/review commit REF\`, \`/review branch BASE\`, \`/review pr NUMBER_OR_URL\`, or \`/review uncommitted\`; put optional review focus on subsequent lines. Do small tasks directly. Give every delegate a short descriptive name and clear acceptance criteria. Use delegate_parallel for independent research or prmanagers that need one common starting commit. Never run concurrent writable workers in a shared checkout; while a worker runs, yield writes to it. PR managers publish only through explicit verified submission to an authorized repository. A successful process exit is not necessarily successful delivery. Inspect structured execution, verification, and delivery states.`;
 
 export function allowedTools(profile: Profile, config: Config): string[] {
 	const tools = ["read", "grep", "find", "ls", "codemode"];
+	if (profile.role === "crmanager") return [...tools, "delegate_review_diff"];
 	if (profile.permissions === "read-write") tools.push("bash", "edit", "write");
 	if (profile.delegation.length) tools.push("delegate", "delegate_parallel");
 	if (profile.role === "prmanager") tools.push("delegate_verify", "delegate_submit");
@@ -39,6 +40,10 @@ export function profilePrompt(profile: Profile, config: Config): string {
 	if (profile.role === "worker")
 		common.push(
 			"Your workspace is inherited from the caller, possibly a prmanager's private clone. Do not switch branches, commit, push, create PRs, or spawn coding workers. Delegate broad research to an allowed thinker. Report changes and tests; the caller owns integration.",
+		);
+	if (profile.role === "crmanager")
+		common.push(
+			"Perform only the supplied /review. Use delegate_review_diff for Git evidence in place of any Git shell commands suggested by the review prompt. Do not implement fixes, change files or refs, publish, post comments, or otherwise mutate anything. Report prioritized findings with file:line evidence, verdict, scope and limitations to the caller; say explicitly if no actionable findings.",
 		);
 	if (profile.role === "prmanager")
 		common.push(
