@@ -6,6 +6,17 @@ import { resolveConfig, validateName, validateInvocation, migrateSettings } from
 import { allowedTools, profilePrompt } from "../src/profiles.ts";
 import { fixture } from "./helpers.ts";
 
+test("built-in profiles default to GPT-6.2 models with high thinking", () => {
+	const { profiles } = resolveConfig();
+	assert.deepEqual(Object.fromEntries(Object.entries(profiles).map(([name, profile]) => [name, profile.model])), {
+		thinker: "openai/gpt-6.2-sol:high",
+		thinktank: "openai/gpt-6.2-sol:high",
+		worker: "openai/gpt-6.2-sol:high",
+		prmanager: "openai/gpt-6.2-sol:high",
+		crmanager: "openai/gpt-6.2-astra:high",
+	});
+});
+
 test("profiles are one configurable base with bounded delegation", () => {
 	const c = resolveConfig();
 	assert.equal(c.profiles.prmanager.workspace, "clone");

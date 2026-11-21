@@ -26,7 +26,7 @@ Delegates runs on macOS and Linux. Use a current Pi with codemode, structured to
 
 A worker launched by a prmanager shares **the prmanager's clone**, never the original checkout. One coding worker owns writes in a shared workspace at a time; its caller must yield writes until it finishes. Independent prmanagers can run concurrently in independent clones. Thinkers can research concurrently, but may observe files changing unless asked to review a finalized candidate.
 
-Models are configurable per profile. Thinker, thinktank, prmanager, and crmanager default to `openai-codex/gpt-6.1-sol:high`; worker uses `openai-codex/gpt-6-luna:medium`. These are preferences, not a hard-coded model-strength ordering. Exact `provider/model` IDs, an optional thinking suffix, and `inherit` are supported. Inherited nested models use the caller delegate's resolved model.
+Models are configurable per profile. Thinker, thinktank, worker, and prmanager default to `openai/gpt-6.2-sol:high`; crmanager defaults to `openai/gpt-6.2-astra:high`. These are preferences, not a hard-coded model-strength ordering. Exact `provider/model` IDs, an optional thinking suffix, and `inherit` are supported. Inherited nested models use the caller delegate's resolved model.
 
 ## Migrate from the dotfiles installation
 
