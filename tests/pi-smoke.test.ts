@@ -33,17 +33,25 @@ for (const mode of ["on", "only"])
 								? "thinktank"
 								: all.includes("You are a thinker delegate.")
 									? "thinker"
-									: "parent";
+									: all.includes("You are a crmanager delegate.")
+										? "crmanager"
+										: "parent";
 					roles.add(role);
 					const toolMessages = request.messages.filter((m: any) => m.role === "tool");
 					let code: string | undefined;
 					if (toolMessages.length === 0) {
 						if (role === "parent")
 							code =
-								'const r = await tools.delegate_parallel({tasks:[{profile:"prmanager",name:"implement",task:"Create new.txt and submit the verified candidate"},{profile:"thinktank",name:"cat-history",task:"Coordinate multiple thinkers to research cat breed histories using web search"}]}); if(r.some(x=>!x.success)) throw Error(JSON.stringify(r)); text(r.map(x=>({success:x.success,delivery:x.delivery.status})));';
+								'const r = await tools.delegate_parallel({tasks:[{profile:"prmanager",name:"implement",task:"Create new.txt and submit the verified candidate"},{profile:"thinktank",name:"cat-history",task:"Coordinate multiple thinkers to research cat breed histories using web search"},{profile:"crmanager",name:"review",task:"/review commit HEAD\\nFocus on source.txt"}]}); if(r.some(x=>!x.success)) throw Error(JSON.stringify(r)); text(r.map(x=>({success:x.success,delivery:x.delivery.status})));';
 						if (role === "prmanager")
 							code =
 								'const r = await tools.delegate({profile:"worker",name:"write",task:"Create new.txt"}); if(!r.success) throw Error(JSON.stringify(r)); text(r.success);';
+						if (role === "crmanager") {
+							assert.match(all, /Please perform a code review/);
+							assert.match(all, /Focus on source\.txt/);
+							assert.match(all, /Delegated scope: Commit/);
+							code = 'const r=await tools.delegate_review_diff({view:"patch",file:"source.txt"}); if(!JSON.stringify(r).includes("+original")) throw Error("wrong review diff"); for(const name of ["bash", "write", "edit", "web_search", "delegate", "delegate_verify", "delegate_submit"]) { let blocked=false; try { await tools[name]({}); } catch { blocked=true; } if(!blocked) throw Error("read-only bypass "+name); } text("read-only review");';
+						}
 						if (role === "worker")
 							code = 'await tools.write({path:"new.txt",content:"candidate\\n"}); text("written");';
 						if (role === "thinktank")
@@ -126,7 +134,9 @@ for (const mode of ["on", "only"])
 								thinktank: { model: "localtest/test" },
 								worker: { model: "localtest/test" },
 								prmanager: { model: "localtest/test", delivery: "candidate" },
+								crmanager: { model: "localtest/test" },
 							},
+							reviewExtension: process.env.PI_DELEGATES_TEST_REVIEW ?? fileURLToPath(new URL("./fake-review.ts", import.meta.url)),
 							environment: { checks: [{ name: "exists", command: "test -f new.txt" }] },
 							extensions: [
 								{
@@ -177,7 +187,7 @@ for (const mode of ["on", "only"])
 						(event) =>
 							event.type === "tool_execution_update" && event.partialResult?.details?.delegateDisplay,
 					);
-				assert.ok(progress.length > 0, "Expected structured delegate progress events");
+				assert.ok(progress.length > 0, `Expected structured delegate progress events\n${r.stderr}\n${r.stdout.slice(-6000)}`);
 				const progressText = progress
 					.flatMap((event) =>
 						event.partialResult.content.filter((c: any) => c.type === "text").map((c: any) => c.text),
@@ -185,7 +195,7 @@ for (const mode of ["on", "only"])
 					.join("\n");
 				assert.match(progressText, /Searching/);
 				assert.doesNotMatch(progressText, /not-run|not-requested|\x1b/);
-				assert.deepEqual([...roles].sort(), ["parent", "prmanager", "thinker", "thinktank", "worker"]);
+				assert.deepEqual([...roles].sort(), ["crmanager", "parent", "prmanager", "thinker", "thinktank", "worker"]);
 				assert.deepEqual(failures, [], failures.join("\n"));
 				assert.equal(fs.existsSync(path.join(f.repo, "new.txt")), false);
 				assert.equal(fs.existsSync(path.join(f.repo, "forbidden.txt")), false);
@@ -196,6 +206,13 @@ for (const mode of ["on", "only"])
 					);
 				const prmanager = jobs.find((j) => j.profile.role === "prmanager");
 				assert.equal(prmanager.delivery.status, "candidate-ready", JSON.stringify(prmanager));
+				const reviewer = jobs.find(j => j.profile.role === "crmanager");
+				assert.equal(reviewer.workspace.kind, "clone");
+				assert.notEqual(reviewer.workspace.path, f.repo);
+				assert.equal(reviewer.delivery.status, "not-requested");
+				assert.equal(reviewer.verification.status, "not-run");
+				assert.equal(reviewer.changedFiles, undefined);
+				assert.equal(reviewer.summary, "Verified smoke response");
 				const thinktank = jobs.find((j) => j.profile.role === "thinktank");
 				assert.equal(thinktank.workspace.cwd, f.repo);
 				assert.equal(thinktank.delivery.status, "not-requested");

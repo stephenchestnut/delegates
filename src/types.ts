@@ -1,4 +1,4 @@
-export type Role = "thinker" | "thinktank" | "worker" | "prmanager";
+export type Role = "thinker" | "thinktank" | "worker" | "prmanager" | "crmanager";
 export type DeliveryMode = "none" | "candidate" | "pr";
 export interface Profile {
 	role: Role;
@@ -41,6 +41,7 @@ export interface Config {
 	display: "compact" | "detailed";
 	environment: Environment;
 	publication?: Publication;
+	reviewExtension?: string;
 	extensions: { path: string; tools: string[]; readOnly: boolean }[];
 }
 export interface Invocation {
@@ -183,4 +184,5 @@ export interface ChildContext {
 	config: Config;
 	allowedProfiles: string[];
 	allowedTools: string[];
+	review?: { args: string; focus: string; scope: string; extension: string };
 }

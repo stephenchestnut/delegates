@@ -64,6 +64,25 @@ test("thinktank cannot escalate permissions, publish, clone, or recursively coor
 		/Unknown profile/,
 	);
 });
+test("crmanager and custom review profiles must remain read-only, clone-based and report-only", () => {
+	for (const overrides of [
+		{ workspace: "shared" }, { permissions: "read-write" }, { delivery: "candidate" },
+		{ delivery: "pr" }, { delegation: ["worker"] }, { delegation: ["thinker"] },
+	]) {
+		assert.throws(() => resolveConfig({ delegates: { profiles: { review: { extends: "crmanager", ...overrides } } } }));
+	}
+	const config = resolveConfig({ delegates: {
+		reviewExtension: "/trusted/review.ts",
+		extensions: [{ path: "/other", tools: ["web_search"], readOnly: true }],
+	} });
+	assert.deepEqual(allowedTools(config.profiles.crmanager, config), ["read", "grep", "find", "ls", "codemode", "delegate_review_diff"]);
+	assert.equal(config.profiles.crmanager.delivery, "none");
+	assert.equal(config.profiles.crmanager.workspace, "clone");
+	assert.equal(config.profiles.crmanager.permissions, "read-only");
+	assert.throws(() => resolveConfig({}, { delegates: { reviewExtension: "/untrusted/review.ts" } }), /user scope/);
+	assert.throws(() => resolveConfig({ delegates: { reviewExtension: "relative/review.ts" } }), /absolute/);
+});
+
 test("manager settings and references normalize to prmanager; new settings win", () => {
 	const input = {
 		delegates: {

@@ -6,6 +6,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import { Type } from "typebox";
 import { loadConfig, migrateSettings, readSettings, resolveConfig } from "./config.ts";
 import { Coordinator } from "./runner.ts";
+import { reviewPrompt } from "./review-bridge.ts";
 import { request } from "./control.ts";
 import { PARENT_GUIDANCE } from "./profiles.ts";
 import { resultOf } from "./types.ts";
@@ -18,7 +19,7 @@ import { renderDisplay } from "./display-render.ts";
 
 const namespace = {
 	name: "delegates",
-	description: "Profile-based research, coding, and verified PR delegation",
+	description: "Profile-based research, code review, coding, and verified PR delegation",
 	instructions:
 		PARENT_GUIDANCE +
 		" Await calls. Inspect success and execution/verification/delivery status. Use delegate_parallel for one pinned-base batch. Tools are callable through codemode; children can use their own codemode with restricted tools.",
@@ -199,7 +200,7 @@ export default function delegates(pi: ExtensionAPI) {
 			renderResult: renderDelegateResult,
 			description:
 				"Run a named delegate with a configured profile. Returns structured execution, verification, delivery, workspace and usage results. Attached: await completion.",
-			promptSnippet: "Delegate focused research, coding, or verified PR work using named profiles",
+			promptSnippet: "Delegate focused research, code review, coding, or verified PR work using named profiles",
 			promptGuidelines: [
 				isChild
 					? `Only delegate to ${profiles.join(", ")}; obey shared-workspace ownership.`
@@ -275,6 +276,30 @@ export default function delegates(pi: ExtensionAPI) {
 					unsubscribe?.();
 				}
 			},
+		});
+	};
+	const registerReview = (review: NonNullable<ChildContext["review"]>) => {
+		pi.registerTool({
+			name: "delegate_review_diff",
+			label: "Inspect review diff",
+			namespace,
+			description: "Read the file list or patch for the pinned review scope. For uncommitted reviews, use files to list untracked files, then read their contents directly. If the patch is truncated, narrow it to one file.",
+			parameters: Type.Object({
+				view: Type.Union([Type.Literal("files"), Type.Literal("patch"), Type.Literal("staged"), Type.Literal("unstaged")]),
+				file: Type.Optional(Type.String()),
+			}, { additionalProperties: false }),
+			async execute(_id, args, signal) {
+				return toolResult(await request(bootstrap!, "reviewDiff", args, signal));
+			},
+		});
+		pi.on("input", async (event, ctx) => {
+			if (event.text !== "/delegates-review") return;
+			try {
+				return { action: "transform", text: await reviewPrompt(pi, ctx, agentDir, review) };
+			} catch (error) {
+				await request(bootstrap!, "reviewError", { error: error instanceof Error ? error.message : String(error) });
+				return { action: "handled" };
+			}
 		});
 	};
 	const registerDelivery = () => {
@@ -397,6 +422,7 @@ export default function delegates(pi: ExtensionAPI) {
 			child = await request<ChildContext>(bootstrap, "context");
 			registerLaunchTools(child.allowedProfiles, true);
 			if (child.profile.role === "prmanager") registerDelivery();
+			if (child.profile.role === "crmanager" && child.review) registerReview(child.review);
 			const registered = new Set(pi.getAllTools().map((t) => t.name));
 			const missing = child.allowedTools.filter((t) => !registered.has(t));
 			if (missing.length) throw new Error(`Configured child tools failed to load: ${missing.join(", ")}`);

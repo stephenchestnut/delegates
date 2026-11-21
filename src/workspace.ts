@@ -21,7 +21,7 @@ export function inside(root: string, target: string): boolean {
 }
 export async function resolveBase(runtime: Runtime, cwd: string, ref?: string): Promise<Base> {
 	const root = await repoRoot(runtime, cwd);
-	const dirty = !!(await git(runtime, root, ["status", "--porcelain"]));
+	const dirty = !!(await git(runtime, root, ["status", "--porcelain"], undefined, { GIT_OPTIONAL_LOCKS: "0" }));
 	if (dirty && !ref)
 		throw new Error(
 			"Parent checkout is dirty. Commit changes, or explicitly select a committed base (dirty changes will be excluded).",
@@ -52,6 +52,12 @@ export async function createClone(
 	await git(runtime, base.root, ["clone", "--no-local", "--no-hardlinks", "--", base.root, target], signal);
 	const slug = name.normalize("NFC").toLowerCase().match(/[\p{L}\p{N}]+/gu)?.join("-") || "job";
 	const branch = `delegates/${slug}-${id.slice(0, 8)}`;
+	try {
+		await git(runtime, target, ["cat-file", "-e", `${base.sha}^{commit}`], signal);
+	} catch {
+		// A pinned base may only be reachable from a source remote-tracking ref.
+		await git(runtime, target, ["fetch", "--no-tags", "--", base.root, base.sha], signal);
+	}
 	await git(runtime, target, ["checkout", "-b", branch, base.sha], signal);
 	let remoteUrl: string | undefined;
 	try {
