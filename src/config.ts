@@ -6,7 +6,7 @@ import type { Check, Config, Invocation, Profile, Role } from "./types.ts";
 export const DEFAULT_PROFILES: Record<Role, Profile> = {
 	thinker: {
 		role: "thinker",
-		model: "openai-codex/gpt-6.1-sol:high",
+		model: "openai/gpt-6.2-sol:high",
 		workspace: "shared",
 		runtime: "host",
 		permissions: "read-only",
@@ -16,7 +16,7 @@ export const DEFAULT_PROFILES: Record<Role, Profile> = {
 	},
 	thinktank: {
 		role: "thinktank",
-		model: "openai-codex/gpt-6.1-sol:high",
+		model: "openai/gpt-6.2-sol:high",
 		workspace: "shared",
 		runtime: "host",
 		permissions: "read-only",
@@ -26,7 +26,7 @@ export const DEFAULT_PROFILES: Record<Role, Profile> = {
 	},
 	worker: {
 		role: "worker",
-		model: "openai-codex/gpt-6-luna:medium",
+		model: "openai/gpt-6.2-sol:high",
 		workspace: "shared",
 		runtime: "host",
 		permissions: "read-write",
@@ -36,7 +36,7 @@ export const DEFAULT_PROFILES: Record<Role, Profile> = {
 	},
 	prmanager: {
 		role: "prmanager",
-		model: "openai-codex/gpt-6.1-sol:high",
+		model: "openai/gpt-6.2-sol:high",
 		workspace: "clone",
 		runtime: "host",
 		permissions: "read-write",
@@ -46,7 +46,7 @@ export const DEFAULT_PROFILES: Record<Role, Profile> = {
 	},
 	crmanager: {
 		role: "crmanager",
-		model: "openai-codex/gpt-6.1-sol:high",
+		model: "openai/gpt-6.2-astra:high",
 		workspace: "clone",
 		runtime: "host",
 		permissions: "read-only",
