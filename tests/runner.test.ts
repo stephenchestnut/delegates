@@ -83,6 +83,41 @@ test("progress scopes isolate identical names and include only their own descend
 		await f.cleanup();
 	}
 });
+test("activity follows the child's own tool calls and prose, and clears when it finishes", async () => {
+	const f = await setup();
+	try {
+		const seen: (string | undefined)[] = [];
+		const stop = f.c.subscribe((rows) => {
+			if (rows[0] && seen.at(-1) !== rows[0].activity) seen.push(rows[0].activity);
+		}, "scope");
+		const r = await f.c.run(
+			{ profile: "thinker", name: "Activity", task: "ACTIVITY" },
+			f.repo,
+			f.config,
+			undefined,
+			undefined,
+			undefined,
+			"scope",
+		);
+		stop();
+		assert.equal(r.success, true, r.error);
+		assert.deepEqual(seen, [
+			"Running the tests now.",
+			"bash: npm test",
+			"read: a.ts",
+			"bash: npm test",
+			"Running the tests now.",
+			"thinker finished; codemode available: true",
+			undefined,
+		]);
+		assert.equal(f.c.displaySnapshot("scope")[0].activity, undefined);
+		// Activity is display-only: it is not written to the manifest or returned in results.
+		assert.doesNotMatch(fs.readFileSync(path.join(r.logDir, "job.json"), "utf8"), /"activity"/);
+		assert.equal("activity" in r, false);
+	} finally {
+		await f.cleanup();
+	}
+});
 test("continuation gets a new display run without inheriting old child progress", async () => {
 	const f = await setup();
 	try {

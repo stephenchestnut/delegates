@@ -1,15 +1,17 @@
 import { stripVTControlCharacters } from "node:util";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
+	isViewportTUI,
 	rgbColor,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
 	type Component,
+	type TuiMouseEvent,
 } from "@earendil-works/pi-tui";
 import { DisplayClock, type Clock } from "./display-clock.ts";
 import { clean, type DisplayRun } from "./display.ts";
-import { renderDisplay, type RenderStyle } from "./display-render.ts";
+import { layoutDisplay, renderDisplay, type DisplayLayout, type RenderStyle } from "./display-render.ts";
 import type { DelegateResult, Role } from "./types.ts";
 
 const ROLE_RGB: Record<"dark" | "light", Record<Role, [number, number, number]>> = {
@@ -51,24 +53,52 @@ export function renderStyle(
 		muted: (text) => (noColor ? text : theme.fg("muted", text)),
 	};
 }
+export interface WidgetViewer {
+	/** Opens or switches to a delegate from a widget row. */
+	select(run: DisplayRun): void;
+	/** Closes the overlay when its selected row is clicked again. */
+	close(): void;
+	/** Job currently shown in the viewer pane, if any. */
+	viewing(): string | undefined;
+}
 /** One widget instance per visible lifecycle; theme is read fresh at render time. */
 export class DelegateWidget {
 	private clock: DisplayClock;
 	private context: ExtensionContext;
 	private redraw: () => void = () => {};
-	constructor(context: ExtensionContext, clock?: Clock) {
+	constructor(context: ExtensionContext, clock?: Clock, viewer?: WidgetViewer) {
 		this.context = context;
 		this.clock = new DisplayClock(
 			{
 				mount: () =>
 					context.ui.setWidget("delegates", (tui) => {
 						this.redraw = () => tui.requestRender();
+						let layout: DisplayLayout = { lines: [], runs: [] };
 						return {
-							render: (width) =>
-								renderDisplay(this.clock.visible(), width, renderStyle(this.context.ui.theme), {
+							render: (width) => {
+								// Read per render: the user can switch between fullscreen and regular mode.
+								const hint = !viewer
+									? undefined
+									: isViewportTUI(tui)
+										? "click a row to open or close"
+										: "/delegates tail to view";
+								layout = layoutDisplay(this.clock.visible(), width, renderStyle(this.context.ui.theme), {
 									ascii: process.env.TERM === "dumb",
 									now: this.clock.now(),
-								}),
+									viewing: viewer?.viewing(),
+									hint,
+								});
+								return layout.lines;
+							},
+							// Only a completed click is claimed, so dragging still selects widget text.
+							handleMouse: (event: TuiMouseEvent) => {
+								if (!viewer || event.type !== "click" || event.button !== "left") return undefined;
+								const run = layout.runs[event.y];
+								if (!run || run.persisted === false) return undefined;
+								if (viewer.viewing() === run.id) viewer.close();
+								else viewer.select(run);
+								return { handled: true };
+							},
 							invalidate() {}, // No cached ANSI strings; resizing/theme changes re-render from facts.
 							dispose: () => {
 								this.redraw = () => {};

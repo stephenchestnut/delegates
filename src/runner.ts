@@ -15,6 +15,7 @@ import { parseReview, prepareReview, reviewDiff, type PreparedReview } from "./r
 import { submit, validateSubmission } from "./delivery/workflow.ts";
 import { emptyUsage, resultOf } from "./types.ts";
 import { DisplayTracker, type DisplayRun, type LaunchIdentity } from "./display.ts";
+import { lastSentence, summarizeCall } from "./transcript.mjs";
 import type { Bootstrap, ChildContext, Config, DelegateResult, Invocation, Job, Profile } from "./types.ts";
 
 interface Running {
@@ -536,6 +537,18 @@ export class Coordinator {
 			let buffer = "",
 				providerError = "",
 				aborted = false;
+			// Widget activity line, read from the stream the parent already receives. Display only.
+			const observe = (event: any) => {
+				const runId = job.displayRunId!;
+				const callId = String(event.toolCallId);
+				// Calls made by a codemode script arrive as their own events, so the newest running call wins.
+				if (event.type === "tool_execution_start")
+					return this.display.call(runId, callId, summarizeCall(event.toolName, event.args));
+				if (event.type === "tool_execution_end") return this.display.call(runId, callId);
+				if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_end")
+					return this.display.note(runId, lastSentence(event.assistantMessageEvent.content));
+				return false;
+			};
 			const onLine = (line: string) => {
 				if (!line.trim()) return;
 				let event: any;
@@ -544,6 +557,11 @@ export class Coordinator {
 				} catch {
 					throw new Error("Child wrote invalid JSONL to stdout");
 				}
+				try {
+					if (observe(event)) this.emitDisplay();
+				} catch {
+					/* Presentation must not alter execution. */
+				}
 				if (event.type === "agent_settled" && event.aborted) aborted = true;
 				if (event.type !== "message_end" || event.message?.role !== "assistant") return;
 				const message = event.message;
@@ -551,7 +569,10 @@ export class Coordinator {
 					.filter((c: any) => c.type === "text")
 					.map((c: any) => c.text)
 					.join("\n");
-				if (text) job.summary = truncate(text, config.maxOutputBytes);
+				if (text) {
+					job.summary = truncate(text, config.maxOutputBytes);
+					this.display.note(job.displayRunId!, lastSentence(text));
+				}
 				providerError = ["error", "aborted"].includes(message.stopReason)
 					? message.errorMessage || `Provider ${message.stopReason}`
 					: ""; // A later successful turn may be Pi's automatic retry/recovery.

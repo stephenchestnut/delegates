@@ -265,6 +265,7 @@ Execution, verification, and delivery are separate states. `candidate-ready` is 
 - `/delegates config`: effective configuration.
 - `/delegates models`: select a profile/model interactively, with settings backup.
 - `/delegates list`: persisted job results, including interrupted runs.
+- `/delegates tail [id|focus|close]`: open, focus, or close the in-TUI transcript overlay. Without an ID, pick a delegate. See [Watching a delegate](#watching-a-delegate).
 - `/delegates inspect <id>`: result, status, workspace and log references.
 - `/delegates cancel <id>`: cancel a job running in this session and its attached descendants.
 - `/delegates recover <id>`: clear a dead owner's lease and mark unfinished execution interrupted. Refuses to steal from a live process.
@@ -285,15 +286,16 @@ The default `delegates.display: "compact"` shows task names at the end, with use
 Delegates
 ● [thinktank] · Coordinating · 3 turns · 20k tok · 2/4 finished · 42s · Cat breed history
   ✓ [thinker] · Done · 2 turns · 12k tok · 12s · Siamese
-  ● [thinker] · Searching · 3 turns · 15k tok · 18s · Persian
+  ● [thinker] · Searching · 3 turns · 15k tok · 18s · Persian · web_search: Persian cat breed origin
   ✓ [thinker] · Done · 2 turns · 10k tok · 15s · Maine Coon
-  ● [thinker] · Running · 1 turns · 8k tok · 11s · Abyssinian
+  ● [thinker] · Running · 1 turns · 8k tok · 11s · Abyssinian · Comparing the two registry accounts.
 ```
 
 The **text of profile labels** is colored: thinker blue, thinktank purple, worker gold, prmanager orange, and crmanager teal, with light/dark variants. Custom profiles inherit their resolved role's color in the live display. Status symbols/text independently use theme colors: active accent, success green, warning amber, failure red, and cancellation/interruption muted. Task names stay neutral. No colored-circle emoji or decorative badges are added.
 
 - Thinkers, thinktanks, crmanagers, and ordinary workers do not show irrelevant `not-run` / `not-requested` placeholders. PR workflows show meaningful phases such as `Verifying`, `Publishing`, and `Waiting for CI`.
 - Specific activity labels come from observed tools, not guessed model behavior. Children running means `Coordinating`, not necessarily an idle parent. `2/4 finished` counts the children launched so far; failed/cancelled children get explicit counts instead.
+- An active row ends with what the delegate is doing now: its running tool call with a short argument summary (`bash: npm test`, `read: src/runner.ts`), or between calls the last sentence it wrote. A long task name is shortened to leave room, and the activity is dropped first at narrow widths. This quotes the delegate's own tool arguments and prose on your screen, with terminal escapes stripped. It is not written to manifests or results.
 - Compact rows include the delegate's own turns and estimated context tokens rounded to the nearest thousand (e.g. `12k tok`) where space permits; model and full IDs remain hidden. Duplicate sibling/root names get a short ID suffix for distinction, **not** an abbreviation accepted by commands.
 - `delegates.display: "detailed"` adds ID/model, self and final subtree turns, and context estimate as space permits. `?` means unknown; older manifests without self usage never treat aggregate turns as self turns.
 - Context is Pi's per-child `getContextUsage()` estimate, not cumulative token usage or a sum across descendants. It is sampled at turn boundaries and after compaction, can lag during streaming/tools, and may be unknown after compaction or if telemetry fails. A completed/history row shows the last available snapshot, not a live measurement; continuation starts fresh. The displayed token count is rounded to the nearest thousand; the context window is not shown. Narrow terminals may hide metadata; errors take precedence.
@@ -305,6 +307,17 @@ The **text of profile labels** is colored: thinker blue, thinktank purple, worke
 
 Profile palettes are selected for dark/light appearance, while status colors follow the active theme. Custom terminal palettes and 256-color approximations may vary; the profile labels and explicit status text remain authoritative. Expanded tool results and inspect output retain fields omitted by compact rendering.
 
+### Watching a delegate
+
+`/delegates tail <id>` opens a live transcript over the **full-height right half of Pi**. It shows assistant text, tool calls, and trimmed tool results from running or finished jobs. It covers the underlying interface rather than reflowing it, and does not open a terminal pane or steal keyboard focus.
+
+- **Switch delegates.** Select another job to reuse the same overlay. The widget marks the selected row with `▸`. A full job ID or a unique prefix works; omit the ID for a picker of this session's delegates (or recent history if there are none).
+- **Mouse (fullscreen only).** Click a widget row to open or switch the overlay; click the selected row again to close it. When the overlay is open, click the exposed left side of the widget. Scroll over the overlay to read earlier output. Regular mode leaves the mouse to the terminal.
+- **Keyboard (both modes).** `Ctrl+Alt+D` or `/delegates tail focus` gives the overlay keyboard focus. Use arrows or Page Up/Down to scroll, `End` to resume following the live output, and `Tab` to return focus to Pi. Press `q` or `Esc` while focused, or run `/delegates tail close` from the editor, to close it.
+- **Full log.** The overlay keeps a bounded transcript buffer. For the whole formatted log, run `node src/tail-view.mjs --job <job-dir> --once`, optionally piping it into a pager. Omit `--once` to follow new output outside Pi.
+
+Closing the overlay does not cancel the delegate. Reloading Pi still cancels attached delegates as described above.
+
 ## Agent-facing guidance
 
 The top-level tools carry concise profile-selection and concurrency instructions plus namespace documentation discoverable through codemode. Each child receives profile-specific instructions generated from resolved capabilities. Thinktanks receive research decomposition, source evaluation, and synthesis guidance. PR managers additionally receive verification/submission and honest-completion requirements. Agents do not need to discover and read this README before using the extension.
@@ -315,6 +328,7 @@ The top-level tools carry concise profile-selection and concurrency instructions
 - Thinker, thinktank, and crmanager read-only behavior is a tool-level allowlist with direct/nested-call checks, not an OS sandbox. Trusted extensions still execute as your user.
 - Host workers/prmanagers have shell access and can access paths, credentials, Keychain helpers, and network services available to your user. Central publication tools provide reliability, not a security boundary against a malicious same-user agent.
 - The private control socket and per-job tokens coordinate jobs; they do not protect against unrestricted code running as the same user.
+- The widget's activity text and the transcript pane display model/tool output from job logs on your screen. Control characters are stripped, but the content itself is whatever the delegate read or wrote.
 - Job logs contain model/tool output and may contain sensitive project data. Protect the agent directory; no log redaction can guarantee removal of secrets emitted by arbitrary tools.
 - Future container execution must run the whole child Pi process inside the boundary. Mounting only Bash into Docker is not equivalent. No container support is implied by the runtime interface.
 

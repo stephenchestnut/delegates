@@ -13,7 +13,8 @@ import { resultOf } from "./types.ts";
 import type { Bootstrap, ChildContext, Usage, Role } from "./types.ts";
 import { createRuntime } from "./runtime/host.ts";
 import { repoRoot } from "./delivery/git.ts";
-import { historicalRuns, plainRows, type DisplayRun } from "./display.ts";
+import { clean, historicalRuns, plainRows, status, type DisplayRun } from "./display.ts";
+import { Viewer } from "./viewer.ts";
 import { DelegateWidget, resultComponent, renderStyle } from "./ui.ts";
 import { renderDisplay } from "./display-render.ts";
 
@@ -130,6 +131,7 @@ export default function delegates(pi: ExtensionAPI) {
 		parentWorkspace: string | undefined;
 	let currentContext: ExtensionContext | undefined;
 	let widget: DelegateWidget | undefined;
+	let viewer: Viewer | undefined;
 	let closing = false;
 	const profileRoles = new Map<string, Role>();
 	const renderDelegateResult = (
@@ -182,10 +184,59 @@ export default function delegates(pi: ExtensionAPI) {
 			resolveModel: (ref) => resolveModel(ref, pi, currentContext!),
 			onChange: (jobs) => {
 				if (closing || currentContext?.mode !== "tui") return;
-				widget ??= new DelegateWidget(currentContext);
+				const context = currentContext;
+				widget ??= new DelegateWidget(context, undefined, {
+					select: (run) => {
+						void view(currentContext ?? context, run.id).catch((error) =>
+							(currentContext ?? context).ui.notify(error instanceof Error ? error.message : String(error), "error"),
+						);
+					},
+					close: () => viewer?.dispose(),
+					viewing: () => viewer?.viewing(),
+				});
 				widget.update(jobs);
 			},
 		}));
+	};
+	/** Opens or retargets the session's in-TUI transcript overlay. */
+	const view = async (ctx: ExtensionContext, id: string) => {
+		if (closing || ctx.mode !== "tui") return;
+		const c = getCoordinator(ctx);
+		const dir = c.store.dir(id);
+		if (!fs.existsSync(dir)) throw new Error(`No recorded delegate job ${id}`);
+		const run = c.displaySnapshot().findLast((r) => r.id === id);
+		let name = run?.name,
+			profile = run?.profile;
+		if (!run) {
+			const job = c.store.get(id);
+			name = job.invocation.name;
+			profile = job.profileName;
+		}
+		viewer ??= new Viewer();
+		viewer.show(ctx, { id, dir, name: name ?? id, profile: profile ?? "delegate" });
+	};
+	/** Full ID, a unique ID prefix, or a picker of this session's delegates (else recent history). */
+	const chooseJob = async (ctx: ExtensionContext, ref?: string): Promise<string | undefined> => {
+		const c = getCoordinator(ctx);
+		if (ref && /^[a-f0-9-]{36}$/.test(ref)) return ref;
+		if (ref) {
+			const matches = c.store.list().filter((j) => j.id.startsWith(ref));
+			if (matches.length === 1) return matches[0].id;
+			throw new Error(matches.length ? `'${ref}' matches ${matches.length} jobs; use more of the ID` : `No delegate job matches '${ref}'`);
+		}
+		const seen = new Set<string>();
+		let runs = c
+			.displaySnapshot()
+			.filter((r) => r.persisted !== false)
+			.reverse()
+			.filter((r) => !seen.has(r.id) && seen.add(r.id));
+		if (!runs.length) runs = historicalRuns(c.store.list().slice(0, 15)).reverse();
+		if (!runs.length) throw new Error("No delegate jobs recorded.");
+		const labels = new Map(
+			runs.map((r) => [`${clean(r.name)} · [${clean(r.profile)}] · ${status(r).label} · ${r.id.slice(0, 8)}`, r.id]),
+		);
+		const chosen = await ctx.ui.select("View delegate transcript", [...labels.keys()]);
+		return chosen ? labels.get(chosen) : undefined;
 	};
 	const registerLaunchTools = (profiles: string[], isChild: boolean) => {
 		if (!profiles.length) return;
@@ -337,11 +388,30 @@ export default function delegates(pi: ExtensionAPI) {
 			Object.keys(resolveConfig(readSettings(path.join(agentDir, "settings.json"))).profiles),
 			false,
 		);
+		pi.registerShortcut("ctrl+alt+d", {
+			description: "Focus or unfocus the delegate transcript overlay",
+			handler: async (ctx) => {
+				if (!viewer?.toggleFocus()) ctx.ui.notify("Open a transcript with /delegates tail", "info");
+			},
+		});
 		pi.registerCommand("delegates", {
-			description: "Delegates: config | models | list | inspect/cancel/recover/discard <id> | migrate",
+			description: "Delegates: config | models | list | tail [id|focus|close] | inspect/cancel/recover/discard <id> | migrate",
 			handler: async (args, ctx) => {
 				try {
-					const [action = "list", id] = args.trim().split(/\s+/);
+					const words = args.trim().split(/\s+/).filter(Boolean);
+					const [action = "list", id] = words;
+					if (action === "tail") {
+						if (ctx.mode !== "tui") throw new Error("The delegate transcript overlay requires the interactive TUI");
+						if (words.length > 2 || id?.startsWith("-")) throw new Error("Usage: /delegates tail [id|focus|close]");
+						if (id === "close") return viewer?.dispose();
+						if (id === "focus") {
+							if (!viewer?.toggleFocus()) ctx.ui.notify("Open a transcript with /delegates tail", "info");
+							return;
+						}
+						const job = await chooseJob(ctx, id);
+						if (job) await view(ctx, job);
+						return;
+					}
 					const c = getCoordinator(ctx);
 					const show = (text: string) => {
 						pi.sendMessage({ customType: "delegates", content: text, display: true }, { triggerTurn: false });
@@ -406,7 +476,7 @@ export default function delegates(pi: ExtensionAPI) {
 						return show(`Saved ${chosen} model: ${selected}`);
 					}
 					show(
-						'Usage: /delegates config | models | list | inspect/cancel/recover/discard <id> | migrate\nContinue with delegate({profile, name, task, continue: "job-id"}).',
+						'Usage: /delegates config | models | list | tail [id|focus|close] | inspect/cancel/recover/discard <id> | migrate\nContinue with delegate({profile, name, task, continue: "job-id"}).',
 					);
 				} catch (error) {
 					ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -440,7 +510,8 @@ export default function delegates(pi: ExtensionAPI) {
 			}
 		}
 	});
-	// Presentation telemetry is best effort, bounded, and never transmits message content.
+	// Control-channel telemetry is best effort, bounded, and never transmits message content. (The
+	// widget's activity line is derived by the parent from the child's own output stream instead.)
 	const reportContext = async (ctx: import("@earendil-works/pi-coding-agent").ExtensionContext) => {
 		if (!bootstrap) return;
 		try {
@@ -483,6 +554,8 @@ export default function delegates(pi: ExtensionAPI) {
 		closing = true;
 		widget?.dispose();
 		widget = undefined;
+		viewer?.dispose();
+		viewer = undefined;
 		await coordinator?.shutdown();
 		coordinator = undefined;
 		currentContext = undefined;

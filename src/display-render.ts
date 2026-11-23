@@ -25,6 +25,15 @@ export interface RenderOptions {
 	ascii?: boolean;
 	mode?: DisplayMode;
 	now?: number;
+	/** Job whose transcript is open in the viewer pane; its row is marked. */
+	viewing?: string;
+	/** Short usage hint appended to the heading when it fits. */
+	hint?: string;
+}
+export interface DisplayLayout {
+	lines: string[];
+	/** For each line, the run it describes, so a pointer row can be mapped back to a delegate. */
+	runs: (DisplayRun | undefined)[];
 }
 function rowCost(row: DisplayRow): number {
 	return 1 + (row.detailed || row.status.error ? 1 : 0);
@@ -36,7 +45,7 @@ function symbol(row: DisplayRow, ascii: boolean): string {
 		row.status.symbol
 	);
 }
-function renderRow(row: DisplayRow, width: number, style: RenderStyle, ascii: boolean): string[] {
+function renderRow(row: DisplayRow, width: number, style: RenderStyle, ascii: boolean, viewing: boolean): string[] {
 	const indent = " ".repeat(Math.min(row.depth * 2, Math.max(0, width - 12)));
 	const prefix = `${indent}${style.status(symbol(row, ascii), row.status.tone)} `;
 	const available = Math.max(0, width - style.width(prefix));
@@ -73,9 +82,24 @@ function renderRow(row: DisplayRow, width: number, style: RenderStyle, ascii: bo
 		duration ? style.muted(duration) : "",
 	].filter(Boolean);
 	const suffix = tokens.join(style.muted(" · "));
-	const nameWidth = Math.max(0, available - style.width(suffix) - 3);
-	const name = style.truncate(row.name, nameWidth);
-	const lines = [style.truncate(prefix + suffix + (name ? style.muted(" · ") + name : ""), width)];
+	const marker = viewing ? (ascii ? "> " : "▸ ") : "";
+	const nameWidth = Math.max(0, available - style.width(suffix) - 3 - marker.length);
+	// A long name shares the row with the activity; a short one leaves it the remainder.
+	const name = style.truncate(
+		row.name,
+		row.activity ? Math.max(Math.min(nameWidth, 24), Math.floor(nameWidth / 2)) : nameWidth,
+	);
+	const room = nameWidth - style.width(name) - 3;
+	const activity = row.activity && name && room >= 8 ? style.truncate(row.activity, room) : "";
+	const lines = [
+		style.truncate(
+			prefix +
+				suffix +
+				(name ? style.muted(" · ") + (marker ? style.status(marker, "active") : "") + name : "") +
+				(activity ? style.muted(" · " + activity) : ""),
+			width,
+		),
+	];
 	if (row.status.error) {
 		// Keep a reference visible even if the diagnostic itself must be shortened.
 		const ref = ` [${row.run.persisted === false ? "launch:" : ""}${clean(row.run.id.slice(0, 8))}]`;
@@ -100,7 +124,15 @@ export function renderDisplay(
 	style: RenderStyle,
 	options: RenderOptions = {},
 ): string[] {
-	if (width <= 0 || !runs.length) return [];
+	return layoutDisplay(runs, width, style, options).lines;
+}
+export function layoutDisplay(
+	runs: DisplayRun[],
+	width: number,
+	style: RenderStyle,
+	options: RenderOptions = {},
+): DisplayLayout {
+	if (width <= 0 || !runs.length) return { lines: [], runs: [] };
 	const max = Math.max(1, options.maxLines ?? 8);
 	const heading = options.heading !== false && max > 1;
 	const rows = buildRows(runs, options.now ?? Date.now(), options.mode);
@@ -124,15 +156,32 @@ export function renderDisplay(
 		for (const r of chain) selected.add(r.run.runId);
 		used += cost;
 	}
-	const lines = heading ? [style.muted("Delegates")] : [];
+	const title = options.hint ? `Delegates · ${options.hint}` : "Delegates";
+	const lines = heading ? [style.muted(style.width(title) <= width ? title : "Delegates")] : [];
+	const owners: (DisplayRun | undefined)[] = heading ? [undefined] : [];
 	for (const row of rows)
-		if (selected.has(row.run.runId)) lines.push(...renderRow(row, width, style, options.ascii ?? false));
+		if (selected.has(row.run.runId))
+			for (const line of renderRow(
+				row,
+				width,
+				style,
+				options.ascii ?? false,
+				options.viewing !== undefined && options.viewing === row.run.id,
+			)) {
+				lines.push(line);
+				owners.push(row.run);
+			}
 	const omitted = rows.length - selected.size;
-	if (omitted)
+	if (omitted) {
 		lines.push(
 			style.muted(style.truncate(`${options.ascii ? "..." : "…"} ${omitted} more · /delegates list`, width)),
 		);
-	return lines
-		.slice(0, max)
-		.map((line) => style.truncate(options.ascii ? line.replace(/ · /g, " | ") : line, width));
+		owners.push(undefined);
+	}
+	return {
+		lines: lines
+			.slice(0, max)
+			.map((line) => style.truncate(options.ascii ? line.replace(/ · /g, " | ") : line, width)),
+		runs: owners.slice(0, max),
+	};
 }

@@ -67,6 +67,14 @@ if (task.includes("THINKER_HELP")) {
 	});
 	if (!child.success) throw Error(child.error);
 }
+if (task.includes("ACTIVITY")) {
+	const emit = (event) => console.log(JSON.stringify(event));
+	emit({ type: "message_update", assistantMessageEvent: { type: "text_end", content: "Plan.\nRunning the tests now." } });
+	emit({ type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "npm test\x1b[2J" } });
+	emit({ type: "tool_execution_start", toolCallId: "t1/1", parentToolCallId: "t1", toolName: "read", args: { path: "a.ts" } });
+	emit({ type: "tool_execution_end", toolCallId: "t1/1", parentToolCallId: "t1", toolName: "read" });
+	emit({ type: "tool_execution_end", toolCallId: "t1", toolName: "bash" });
+}
 if (task.includes("WRITE_FILE")) {
 	await request(bootstrap, "beginTool", { tool: "write", id: "edit-1" });
 	fs.writeFileSync(path.join(process.cwd(), "new.txt"), "candidate\n");

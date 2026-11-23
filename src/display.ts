@@ -28,6 +28,8 @@ export interface DisplayRun {
 	totalTurns?: number;
 	contextSnapshot?: Job["contextSnapshot"];
 	tools: string[];
+	/** What an active delegate is doing now: its running tool call, else the last thing it wrote. */
+	activity?: string;
 }
 export interface LaunchIdentity {
 	id: string;
@@ -37,10 +39,46 @@ export interface LaunchIdentity {
 }
 export const RETAIN_MS = 5_000;
 
-/** Presentation-only facts: no sockets, timers, disk writes, or permission decisions. */
+/**
+ * Presentation-only facts: no sockets, timers, disk writes, or permission decisions. Activity text
+ * quotes the delegate's own tool arguments and prose; it is shown locally and never persisted here.
+ */
 export class DisplayTracker {
 	private runs = new Map<string, DisplayRun>();
 	private tools = new Map<string, Map<string, string>>();
+	private calls = new Map<string, Map<string, string>>();
+	private notes = new Map<string, string>();
+	private refresh(runId: string): boolean {
+		const row = this.runs.get(runId);
+		if (!row) return false;
+		const next =
+			row.finishedAt === undefined
+				? ([...(this.calls.get(runId)?.values() ?? [])].at(-1) ?? this.notes.get(runId))
+				: undefined;
+		if (next === row.activity) return false;
+		row.activity = next;
+		return true;
+	}
+	private forget(runId: string): void {
+		this.tools.delete(runId);
+		this.calls.delete(runId);
+		this.notes.delete(runId);
+		this.refresh(runId);
+	}
+	/** Records a running tool call's summary, or its end when text is undefined. Returns whether the row changed. */
+	call(runId: string, callId: string, text?: string): boolean {
+		if (!this.runs.has(runId)) return false;
+		if (!this.calls.has(runId)) this.calls.set(runId, new Map());
+		if (text) this.calls.get(runId)!.set(callId, text);
+		else this.calls.get(runId)!.delete(callId);
+		return this.refresh(runId);
+	}
+	/** Records the last thing the delegate wrote. Returns whether the row changed. */
+	note(runId: string, text: string): boolean {
+		if (!this.runs.has(runId) || !text) return false;
+		this.notes.set(runId, text);
+		return this.refresh(runId);
+	}
 	start(
 		identity: LaunchIdentity,
 		invocation: Invocation,
@@ -85,7 +123,7 @@ export class DisplayTracker {
 		});
 		if (row.finishedAt !== undefined) {
 			row.tools = [];
-			this.tools.delete(runId);
+			this.forget(runId);
 		}
 	}
 	fail(runId: string, error: unknown, cancelled: boolean): void {
@@ -98,7 +136,7 @@ export class DisplayTracker {
 			error: String(error),
 			tools: [],
 		});
-		this.tools.delete(runId);
+		this.forget(runId);
 	}
 	beginTool(runId: string, callId: string, name: string): void {
 		const row = this.runs.get(runId);
@@ -247,6 +285,7 @@ export interface DisplayRow {
 	progress: string;
 	elapsed: string;
 	detailed: boolean;
+	activity: string;
 }
 export function visibleRuns(runs: DisplayRun[], now = Date.now()): DisplayRun[] {
 	const shown = runs.filter((r) => r.show);
@@ -291,6 +330,7 @@ export function buildRows(runs: DisplayRun[], now = Date.now(), mode?: DisplayMo
 				progress: childProgress(sub),
 				elapsed: elapsed(r, now),
 				detailed: (mode ?? r.mode) === "detailed",
+				activity: active(r) ? clean(r.activity) : "",
 			});
 			visit(sub, depth + 1);
 		}
@@ -318,7 +358,7 @@ export function plainRows(runs: DisplayRun[], now = Date.now(), mode: DisplayMod
 	return buildRows(runs, now, mode)
 		.flatMap((row) => {
 			const prefix = "  ".repeat(row.depth);
-			const main = `${prefix}${row.status.symbol} [${clean(row.run.profile)}] · ${row.status.label} · ${metrics(row.run)}${row.progress ? ` · ${row.progress}` : ""}${row.elapsed ? ` · ${row.elapsed}` : ""} · ${row.name}`;
+			const main = `${prefix}${row.status.symbol} [${clean(row.run.profile)}] · ${row.status.label} · ${metrics(row.run)}${row.progress ? ` · ${row.progress}` : ""}${row.elapsed ? ` · ${row.elapsed}` : ""} · ${row.name}${row.activity ? ` · ${row.activity}` : ""}`;
 			return [
 				main,
 				...(row.status.error

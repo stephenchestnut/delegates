@@ -197,6 +197,32 @@ test("tracker preserves independent snapshots, scope identity, tool activity and
 	assert.equal(historicalRuns([j])[0].selfTurns, undefined);
 	assert.match(plainRows(historicalRuns([j]), 5000, "detailed"), /10 recorded turns/);
 });
+test("activity shows the newest running call, falls back to the last note, and ends with the run", () => {
+	const tracker = new DisplayTracker(),
+		j = job();
+	tracker.start({ id: j.id, runId: "one", scopeId: "s" }, j.invocation, j.profile, j.config, 0);
+	const activity = () => tracker.snapshot()[0].activity;
+	assert.equal(tracker.note("one", "Reading the plan."), true);
+	assert.equal(tracker.note("one", "Reading the plan."), false, "unchanged text does not redraw");
+	assert.equal(tracker.note("one", ""), false);
+	assert.equal(tracker.call("one", "a", "codemode: script"), true);
+	assert.equal(tracker.call("one", "a/1", "read: a.ts"), true);
+	assert.equal(activity(), "read: a.ts");
+	tracker.call("one", "a/1");
+	assert.equal(activity(), "codemode: script");
+	tracker.call("one", "a");
+	assert.equal(activity(), "Reading the plan.");
+	assert.equal(tracker.call("missing", "a", "x"), false);
+	const rows = buildRows(tracker.snapshot(), 1000);
+	assert.equal(rows[0].activity, "Reading the plan.");
+	assert.match(plainRows(tracker.snapshot(), 1000), / · Cats · Reading the plan\.$/);
+	tracker.call("one", "b", "bash: \x1b[2Jnpm test");
+	assert.equal(buildRows(tracker.snapshot(), 1000)[0].activity, "bash: npm test");
+	tracker.fail("one", "boom", false);
+	assert.equal(activity(), undefined);
+	assert.equal(tracker.call("one", "c", "late"), false);
+	assert.equal(buildRows([row({ activity: "stale", execution: "stopped", finishedAt: 1 })], 1000)[0].activity, "");
+});
 test("clock only renders; retains completion, stops while hidden, and disposes idempotently", () => {
 	let now = 0,
 		mounts = 0,

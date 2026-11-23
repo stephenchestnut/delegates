@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { renderDisplay, type RenderStyle } from "../src/display-render.ts";
+import { layoutDisplay, renderDisplay, type RenderStyle } from "../src/display-render.ts";
 import type { DisplayRun } from "../src/display.ts";
 
 // Use the real bundled width/color helpers when Pi is installed, without vendoring it.
@@ -246,4 +247,108 @@ test("collapsed results use their own captured metrics without changing structur
 	const unknown = ui.resultComponent(results[0], "", false, theme("dark")).render(160).join("\n");
 	assert.match(unknown, /turns \?.*ctx \?/);
 	assert.equal(JSON.stringify(results), before);
+});
+
+test("activity shares the row with the name, yields at narrow widths, and the viewed row is marked", { skip: !tui }, () => {
+	const style = ui.renderStyle(theme("dark"), true);
+	const run = { ...rows()[0], name: "frog-research", activity: "bash: npm test -- --watch=false" };
+	const wide = renderDisplay([run], 120, style, { heading: false, now: 1000 });
+	assert.equal(wide[0], "● [thinktank] · Running · 2 turns · ctx ? · 1s · frog-research · bash: npm test -- --watch=false");
+	const tight = renderDisplay([run], 80, style, { heading: false, now: 1000 })[0];
+	assert.match(tight, /frog-research · bash: npm test.*…$/);
+	const long = renderDisplay([{ ...run, name: "n".repeat(80) }], 120, style, { heading: false, now: 1000 })[0];
+	assert.match(long, /n{20,}… · bash: npm/, "a long name is shortened so activity stays visible");
+	for (const width of [1, 10, 30, 50, 70, 200])
+		for (const line of renderDisplay([run], width, style, { now: 1000, viewing: run.id }))
+			assert.ok(tui.visibleWidth(line) <= width, JSON.stringify({ width, line }));
+	assert.doesNotMatch(renderDisplay([run], 44, style, { heading: false, now: 1000 })[0], /bash/);
+	assert.match(renderDisplay([run], 120, style, { heading: false, now: 1000, viewing: run.id })[0], / · ▸ frog-research · bash/);
+	assert.match(
+		renderDisplay([run], 120, style, { heading: false, now: 1000, viewing: run.id, ascii: true })[0],
+		/ \| > frog-research \| bash/,
+	);
+	assert.doesNotMatch(renderDisplay([run], 120, style, { heading: false, now: 1000, viewing: "other" })[0], /▸/);
+	assert.equal(renderDisplay([run], 120, style, { now: 1000, hint: "click a row to view" })[0], "Delegates · click a row to view");
+	assert.equal(renderDisplay([run], 12, style, { now: 1000, hint: "click a row to view" })[0], "Delegates");
+});
+test("layout maps every rendered line to its delegate, including error and overflow lines", { skip: !tui }, () => {
+	const style = ui.renderStyle(theme("dark"), true);
+	const data = rows();
+	data[1] = { ...data[1], execution: "failed", finishedAt: 1000, error: "boom" };
+	const layout = layoutDisplay(data, 100, style, { now: 2000 });
+	assert.equal(layout.lines.length, layout.runs.length);
+	assert.deepEqual(
+		layout.runs.map((r) => r?.runId),
+		[undefined, "run0", "run1", "run1", "run2", "run3"],
+	);
+	for (let i = 4; i < 14; i++) data.push({ ...data[2], id: `x${i}`, runId: `x${i}`, name: `Child ${i}` });
+	const full = layoutDisplay(data, 100, style, { now: 2000 });
+	assert.ok(full.lines.length <= 8);
+	assert.equal(full.runs.length, full.lines.length);
+	assert.match(full.lines.at(-1)!, /more/);
+	assert.equal(full.runs.at(-1), undefined);
+	for (const [i, run] of full.runs.entries()) if (run) assert.ok(full.lines[i].includes(run.name.slice(0, 5)) || run.error);
+	assert.deepEqual(layoutDisplay([], 100, style), { lines: [], runs: [] });
+});
+test("clicking a widget row opens, switches, or closes its transcript; unrelated gestures pass through", { skip: !tui }, () => {
+	let component: any;
+	const selected: string[] = [];
+	let viewing: string | undefined;
+	const context = {
+		ui: {
+			theme: theme("dark"),
+			setWidget(_key: string, factory?: any) {
+				component = factory ? factory({ requestRender() {} }, theme("dark")) : undefined;
+			},
+		},
+	};
+	const widget = new ui.DelegateWidget(
+		context,
+		{ now: () => 1000, everySecond: () => 1, cancel() {} },
+		{
+			select: (run: DisplayRun) => { selected.push(run.id); viewing = run.id; },
+			close: () => { viewing = undefined; },
+			viewing: () => viewing,
+		},
+	);
+	const data = rows();
+	data[3] = { ...data[3], persisted: false };
+	widget.update(data);
+	const click = (y: number, extra = {}) =>
+		component.handleMouse({ type: "click", button: "left", x: 3, y, width: 100, height: 5, ...extra });
+	assert.equal(click(1), undefined, "no hit map before the first render");
+	const plain = () => component.render(100).map((line: string) => stripVTControlCharacters(line));
+	assert.equal(plain()[0], "Delegates · /delegates tail to view", "regular mode has no mouse, so it names the command");
+	assert.equal(click(0), undefined);
+	assert.deepEqual(click(1), { handled: true });
+	assert.deepEqual(click(3), { handled: true });
+	assert.deepEqual(selected, [data[0].id, data[2].id]);
+	assert.equal(click(4), undefined, "a launch without a job directory has nothing to view");
+	assert.equal(click(9), undefined);
+	assert.equal(click(2, { type: "press" }), undefined, "drags must stay available for text selection");
+	assert.equal(click(2, { button: "right" }), undefined);
+	assert.equal(selected.length, 2);
+	assert.equal(viewing, data[2].id);
+	assert.match(plain()[3], / · ▸ /);
+	assert.deepEqual(click(3), { handled: true });
+	assert.equal(viewing, undefined, "clicking the selected row again closes the overlay");
+	assert.doesNotMatch(plain()[3], / · ▸ /);
+	assert.equal(selected.length, 2, "closing doesn't reselect the delegate");
+	// Pi mounts widgets in a container under a spacer; the real dispatcher must reach the same row.
+	const host = new tui.Container();
+	host.addChild(new tui.Spacer(1));
+	host.addChild(component);
+	const height = host.render(100).length;
+	const dispatched = host.handleMouse({
+		type: "click", button: "left", x: 3, y: 3, screenX: 3, screenY: 20, width: 100, height,
+		shift: false, alt: false, ctrl: false,
+	});
+	assert.equal(dispatched?.handled, true);
+	assert.equal(dispatched?.target.component, component);
+	assert.equal(selected.at(-1), data[1].id);
+	widget.dispose();
+	// Without a viewer the widget is display-only, as before.
+	new ui.DelegateWidget(context, { now: () => 1000, everySecond: () => 1, cancel() {} }).update(rows());
+	assert.equal(plain()[0], "Delegates");
+	assert.equal(click(1), undefined);
 });
